@@ -1,0 +1,449 @@
+---
+title: "Dead cell analysis - all samples"
+author: "Elisa Roesti"
+date: '2022-07-28'
+output: md_document
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(dplyr)
+library(SingleCellExperiment)
+library(cowplot)
+library(sccomp)
+library(ggplot2)
+library(patchwork)
+library(introdataviz)
+library(clusterProfiler)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(dittoSeq)
+library(tidyseurat)
+library(tidyr)
+library(tidyverse)
+library(tidySingleCellExperiment)
+library(tidysc)
+```
+
+
+## Loading all samples & define alive/dead
+
+
+```{r}
+#select directory
+files <- dir("/stornext/Bioinf/data/bioinf-data/Papenfuss_lab/projects/roestie/roestielisa/PBMC/data/3_prime_batch_1/preprocessing_results/non_batch_variation_removal/", full.name = T)
+#combine count dataframe by rows using seurat function merge
+merged_combined <- 
+  files |>
+  map(readRDS) |>
+  purrr::reduce(merge)
+
+merged_combined #98,626 × 16
+```
+
+```{r}
+#loading, merging and left_join
+files_annotation <- dir("/stornext/Bioinf/data/bioinf-data/Papenfuss_lab/projects/roestie/roestielisa/PBMC/data/3_prime_batch_1/preprocessing_results/annotation_label_transfer/", full.name = T)
+files_alive_identification <- dir("/stornext/Bioinf/data/bioinf-data/Papenfuss_lab/projects/roestie/roestielisa/PBMC/data/3_prime_batch_1/preprocessing_results/alive_identification", full.name = T)
+
+```
+
+
+
+```{r}
+#load merge and join:
+merged_combined_annotation_alive <- #after annotation 98,626 × 20, after alive: 98,626 × 29
+  
+  #join annotation
+  merged_combined |>
+  left_join(
+    files_annotation |>
+      map(readRDS) |>
+      purrr::reduce(bind_rows), by=".cell") |>
+  #join alive identification
+  left_join(
+    files_alive_identification |>
+      map(readRDS) |>
+      purrr::reduce(bind_rows), by = c(".cell", "predicted.celltype.l1", "refUMAP_1", "refUMAP_2"))
+
+```
+
+```{r}
+merged_combined_annotation_alive %>% select(sample) %>% table()
+```
+
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+merged_combined_annotation_alive %>% select(alive) %>% table() #FALSE6441  TRUE 92185
+#select RNA data
+DefaultAssay(merged_combined_annotation_alive) <- "SCT"
+```
+
+
+### Identity ?
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+Idents(object = merged_combined_annotation_alive) <- "sample"
+#Idents(object = merged_combined_annotation_alive)
+```
+
+
+
+## Plot 1 - Visualisation of Mitochondria content
+
+### For each sample
+
+```{r}
+#original ggplot
+merged_combined_annotation_alive |>
+  
+  #violin plot
+  ggplot(aes(x=sample, y=subsets_Mito_percent, fill=alive)) + 
+  introdataviz::geom_split_violin() +
+  scale_y_sqrt() +
+  theme(axis.text.x=element_text(angle=70, hjust=1)) +
+  theme_bw()
+```
+
+
+### For each sample according to cell type
+
+```{r, fig.height= 50, fig.width= 20}
+#facet by sample, x= celltypes
+merged_combined_annotation_alive |>
+  
+  #violin plot
+  ggplot(aes(x=predicted.celltype.l1, y=subsets_Mito_percent, fill=alive)) + 
+  introdataviz::geom_split_violin() +
+  facet_wrap(~sample, scale="free_y", ncol =1) +
+  theme(axis.text.x=element_text(angle=70, hjust=1)) +
+  theme_bw()
+```
+
+## Plot 2 - Visualisation of apoptosis, necrosis, autophagy and stress markers
+
+```{r, warning=FALSE, message=FALSE}
+# selecting stress markers - splitting the markers for better visualisation
+stress_markers <- c("JUN", "FOS", "IL6", "TNF", "CXCR4", "SNAI1", "VIM", "GADD45B", "MCL1","STAT1", "IRF7", "IRF3", "IRF1", "CDKN2A", "TP53", "MRTFB", "RBL1", "NUPR1", "IFNG", "IFNB1", "IFNA2", "IFNL1", "IFNA1", "IFNK", "TNF", "IL-12")
+
+#selecting death markers
+apoptosis_markers <- c("BCL2L1", "CASP9", "CHP2", "CYCS", "EXOG", "IL1A", "IL1R1", "IL1RAP", "IL3RA", "PIK3CA", "PIK3CD", "PIK3CG", "PIK3R1", "PIK3R2", "PRKAR1B", "NFKBIA", "TNFRSF10A", "TNFRSF10B", "TNFRSF10D", "TNFRSF1A")
+necrosis_markers = c("DNML1", "GSDME", "IPMK", "MLKL", "RBCK1", "TICAM1", "YBX3")
+autophagy_markers = c("ATG12", "GABARAPL1", "IFNA17", "IFNA8")
+```
+
+
+
+```{r}
+#first drop the MT gene from the nCount_SCT :
+mitochondrial_genes = grep("^MT-", rownames(merged_combined_annotation_alive[["SCT"]]),value = T)
+ribosomal_genes = grep("^RP(S|L)", rownames(merged_combined_annotation_alive[["SCT"]]), value = T)
+
+#remove the gene from the matrix #dim before 98,626 × 29.     98,626 × 29
+merged_combined_annotation_alive_no_MT_no_rib <-
+  merged_combined_annotation_alive[! rownames(merged_combined_annotation_alive) %in% mitochondrial_genes, ]
+
+merged_combined_annotation_alive_no_MT_no_rib <-
+  merged_combined_annotation_alive_no_MT_no_rib[! rownames(merged_combined_annotation_alive_no_MT_no_rib) %in% ribosomal_genes, ]
+```
+
+
+```{r}
+#re-scaling, see github
+all.genes <- rownames(merged_combined_annotation_alive_no_MT_no_rib)
+head(all.genes)
+merged_combined_annotation_alive_no_MT_no_rib<- ScaleData(merged_combined_annotation_alive_no_MT_no_rib, assay = "SCT", slot='scale.data', features = all.genes)
+```
+
+
+```{r, fig.height=20}
+# Creating gene signatures:
+
+# 1 create a gene signature + genes in the signature dataframe:
+#stress
+stress_markers_df <- as.data.frame(stress_markers)
+stress_markers_df$signature <- "stress"
+colnames(stress_markers_df)[1] <- ".feature"
+
+apoptosis_markers_df <- as.data.frame(apoptosis_markers)
+apoptosis_markers_df$signature <- "apoptosis"
+colnames(apoptosis_markers_df)[1] <- ".feature"
+
+necrosis_markers_df <- as.data.frame(necrosis_markers)
+necrosis_markers_df$signature <- "necrosis"
+colnames(necrosis_markers_df)[1] <- ".feature"
+
+autophagy_markers_df <- as.data.frame(autophagy_markers)
+autophagy_markers_df$signature <- "autophagy"
+colnames(autophagy_markers_df)[1] <- ".feature"
+
+#bind by rows, obtain only 1 dataframe with all the signatures
+gene_signatures <- rbind(stress_markers_df, apoptosis_markers_df, necrosis_markers_df, autophagy_markers_df)
+
+
+#combine the new dataframe with my seurat object:
+#join seurat object with signature dataframe, option long, bind by col created = .features
+merged_combined_annotation_alive_no_MT_no_rib_signature <-
+merged_combined_annotation_alive_no_MT_no_rib |>
+  join_features(
+    features = c(stress_markers, apoptosis_markers, necrosis_markers, autophagy_markers),
+    shape="long") |>
+  left_join(gene_signatures, by = ".feature")
+
+#Plot 1 - facet by gene signatures
+merged_combined_annotation_alive_no_MT_no_rib_signature |>
+  group_by(.cell, signature, alive, sample) |>
+  mutate(sum_of_counts = sum(.abundance_SCT)) |>
+#create the ggplot facet by gene signatures
+  ggplot(aes(x=sample, y=sum_of_counts, fill=alive)) + 
+  introdataviz::geom_split_violin() +
+  facet_wrap(~signature,  scale="free_y" ) + #ncol=1
+  theme(axis.text.x=element_text(angle=70, hjust=1)) +
+  theme_bw()
+
+#Plot 2 - facet by samples
+#create the column sum of counts
+merged_combined_annotation_alive_no_MT_no_rib_signature |>
+  group_by(.cell, signature, alive, sample) |>
+  mutate(sum_of_counts = sum(.abundance_SCT)) |>
+
+#create the ggplot facet by samples
+  ggplot(aes(x=signature, y=sum_of_counts, fill=alive)) + 
+  introdataviz::geom_split_violin() +
+  facet_wrap(~sample, scale="free_y", ncol=3) + #ncol=1
+  theme(axis.text.x=element_text(angle=70, hjust=1)) +
+  theme_bw()
+
+
+```
+
+
+
+
+## Plot 3 - Composition of cells
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#merged_samples
+
+# celltype :  predicted.celltype.l1
+# counts : nCount_SCT
+
+#I also have to distinguished between alive and dead: I have a label in the column alive_dead, or I can create the sample_alive/dead like below
+
+plot_composition_1 <-
+  merged_combined_annotation_alive |>
+  unite("sample_alive", c(sample, alive), remove=FALSE) |>
+  unite("sample_alive", c(sample, alive), remove=FALSE) |>
+  select(sample, nCount_SCT, predicted.celltype.l1, alive, sample_alive) |>
+  
+  # create frquency column
+  mutate(frequency = nCount_SCT/sum(nCount_SCT)*100) |>
+  
+  # create the proportion column
+  group_by(sample_alive) |>
+  mutate(tot_sample_proportion = sum(frequency)) |>
+  ungroup() |>
+  mutate(proportion = (frequency * 1)/tot_sample_proportion) |>
+  
+  #plot proportion
+  ggplot(aes(x = sample_alive, y = proportion, fill = predicted.celltype.l1)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, hjust=1)) +
+  facet_wrap(~alive)
+
+plot_composition_1
+```
+
+
+
+```{r, fig.width = 15, fig.height = 8, warning=FALSE, message=FALSE, echo=FALSE}
+plot_composition_2 <-
+  merged_combined_annotation_alive |>
+  unite("sample_alive", c(sample, alive), remove=FALSE) |>
+  select(sample, nCount_SCT, predicted.celltype.l2, alive, sample_alive) |>
+  
+  # create frquency column
+  mutate(frequency = nCount_SCT/sum(nCount_SCT)*100) |>
+  
+  # create the proportion column
+  group_by(sample_alive) |>
+  mutate(tot_sample_proportion = sum(frequency)) |>
+  ungroup() |>
+  mutate(proportion = (frequency * 1)/tot_sample_proportion) |>
+  
+  #plot proportion
+  ggplot(aes(x = sample_alive, y = proportion, fill = predicted.celltype.l2)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  facet_wrap(~alive)
+  
+plot_composition_2
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+res =
+  merged_combined_annotation_alive |>
+  
+  unite("sample_alive", c(sample, alive), remove=FALSE) |>
+  sccomp_glm( 
+    formula_composition = ~ alive + sample,  #paired analysis(when adding + sample)
+    formula_variability = ~ 1, 
+    sample_alive, 
+    predicted.celltype.l1
+  )
+#duplicate rows error when using seurat function to merge samples
+```
+
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+res
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#composition plot
+plots = plot_summary(res)
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#to visualise each cell type in a boxplot
+plots$boxplot[1]
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#Plot of estimates of differential composition (c_) on the x axis, and differential variability (v_) on the y axis. The error bars represent 95% credible intervals. The dashed lines represent the minimal effect that the hypothesis test is based on. An effect is labelled as significant if bigger than the minimal effect according to the 95% credible interval. Facets represent the covariates in the model.
+#plots$credible_intervals_1D
+```
+
+
+
+## Plot 4 - Check marker for activation induced cell death (Fas/CD95 - FasL/CD95L)
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+DefaultAssay(merged_combined_annotation_alive) <- "ADT"
+#rownames(merged_samples@assays$ADT@meta.features) # "CD95-Fas" "CD178-Fas-L"
+Fas_FasL <- c("CD95-Fas", "CD178-Fas-L")
+Fas <- c("CD95-Fas")
+FasL <- c("CD178-Fas-L")
+```
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, fig.height=20}
+Fas_plot <-
+  merged_combined_annotation_alive |>
+  join_features(
+    features = Fas,
+    shape="long") |> #created a new column .feature , assay="SCT")
+  
+  #violin plot
+  ggplot(aes(x=predicted.celltype.l2, y=.abundance_ADT, fill=alive)) + 
+  introdataviz::geom_split_violin(show.legend = FALSE) +
+  facet_wrap(~sample, scale="free") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  ggtitle("Fas")
+
+Fas_plot
+```
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE,fig.height=20}
+Fas_ligand_plot <-
+  merged_combined_annotation_alive |>
+  join_features(
+    features = FasL,
+    shape="long") |> #created a new column .feature , assay="SCT") 
+  
+  #violin plot
+  ggplot(aes(x=predicted.celltype.l2, y=.abundance_ADT, fill=alive)) + 
+  introdataviz::geom_split_violin() +
+  facet_wrap(~sample, scale="free") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  ggtitle("Fas Ligand")
+
+Fas_ligand_plot
+```
+
+
+## Plot 5 - Gene Ontology genes analysis
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+library(clusterProfiler)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+```
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#Select alive and dead cells as Identities
+DefaultAssay(merged_combined_annotation_alive_no_MT_no_rib) <- "RNA"
+Idents(merged_combined_annotation_alive_no_MT_no_rib) <- merged_combined_annotation_alive_no_MT_no_rib$alive
+levels(Idents(merged_combined_annotation_alive_no_MT_no_rib))
+```
+
+### Gene Ontology: Alive cells
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+alive.markers <-
+  merged_combined_annotation_alive_no_MT_no_rib |>
+  NormalizeData(assay="RNA") |>
+  ScaleData(assay="RNA") |>
+  FindMarkers(
+  ident.1 = "TRUE",
+  assay = "RNA"
+)
+```
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#take the positive log2Foldchange genes
+alive.markers[alive.markers$avg_log2FC > 0.5, ]
+#select gene names to test
+gene_to_test_alive <- rownames(alive.markers[alive.markers$avg_log2FC > 0.5, ])
+#perform enrichGO
+GO_results_BP_alive <- enrichGO(gene = gene_to_test_alive, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "BP", pvalueCutoff=0.01) # keytype= "ENTREZID", "ENSEMBL" or "SYMBOL"
+```
+
+
+```{r, fig.width = 5, fig.height = 13, warning=FALSE, message=FALSE, echo=FALSE}
+#plot
+#fit_alive <- plot(barplot(GO_results_BP_alive, showCategory = 20))
+```
+
+### Gene Ontology: Dead cells
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+dead.markers <- 
+  merged_combined_annotation_alive_no_MT_no_rib |>
+  NormalizeData(assay="RNA") |>
+  ScaleData(assay="RNA") |>
+  FindMarkers(
+  ident.1 = "FALSE",
+  assay = "RNA",
+  min.pct = 0.25
+)
+
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#take the positive log2Foldchange genes
+dead.markers[dead.markers$avg_log2FC > 0.5, ]
+#select gene names to test
+gene_to_test_dead <- rownames(dead.markers[dead.markers$avg_log2FC > 0.5, ])
+#perform enrichGO
+GO_results_BP_dead <- enrichGO(gene = gene_to_test_dead, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "BP") # keytype= "ENTREZID", "ENSEMBL" or "SYMBOL"
+```
+
+
+
+```{r, fig.width = 5, fig.height = 13, warning=FALSE, message=FALSE, echo=FALSE}
+#plot
+fit_dead <- plot(barplot(GO_results_BP_dead, showCategory = 20))
+```
+
+
